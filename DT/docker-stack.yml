@@ -1,0 +1,134 @@
+# GateSync – plné nasadenie na 3 Docker hostiteľov (3 VM) cez Docker Swarm a overlay sieť.
+#
+#   1) na VM1:  docker swarm init --advertise-addr <IP_VM1>
+#      na VM2, VM3: docker swarm join --token <token> <IP_VM1>:2377
+#   2) na manažérovi označiť hostiteľov (pri 2 strojoch môže mať jeden stroj dva labely, napr. gate_b aj gate_c):
+#        docker node update --label-add gate_a=true <vm1>
+#        docker node update --label-add gate_b=true <vm2>
+#        docker node update --label-add gate_c=true <vm3>
+#   3) obraz musí byť v registri dostupnom zo všetkých VM (REGISTRY, napr. ghcr.io/<user>):
+#        REGISTRY=ghcr.io/<user> docker stack deploy -c docker-stack.yml gatesync
+#
+# Každý uzol (api + worker + db + volume) beží na svojom hostiteľovi vďaka placement constraints.
+# Komunikácia medzi hostiteľmi ide cez overlay sieť "cluster".
+
+x-app: &app
+  image: ${REGISTRY:-localhost:5000}/gatesync-app:${TAG:-1.0}
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+x-db: &db
+  image: postgres:16-alpine
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: gatesync
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d gatesync"]
+    interval: 5s
+    retries: 10
+
+x-worker-hc: &worker_hc
+  test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(cat /tmp/worker-heartbeat) )) -lt 30"]
+  interval: 10s
+  retries: 3
+  start_period: 20s
+
+services:
+  # ---------------- Uzol A (stroj s labelom gate_a=true) ----------------
+  db-a:
+    <<: *db
+    volumes: [pgdata_a:/var/lib/postgresql/data]
+    networks: [net_a]
+    deploy: { placement: { constraints: [node.labels.gate_a == true] } }
+  api-a:
+    <<: *app
+    env_file: nodes/a.env
+    environment: { COMPONENT: api, PUBLIC_URL: "http://${HOST_A:-vm1}:3001" }
+    ports: ["3001:3000"]
+    networks: [net_a, cluster]
+    deploy:
+      placement: { constraints: [node.labels.gate_a == true] }
+      restart_policy: { condition: any }
+      update_config: { order: start-first, failure_action: rollback }
+  worker-a:
+    <<: *app
+    command: ["node", "src/worker.js"]
+    env_file: nodes/a.env
+    environment: { COMPONENT: worker }
+    healthcheck: *worker_hc
+    networks: [net_a, cluster]
+    deploy: { placement: { constraints: [node.labels.gate_a == true] } }
+
+  # ---------------- Uzol B (stroj s labelom gate_b=true) ----------------
+  db-b:
+    <<: *db
+    volumes: [pgdata_b:/var/lib/postgresql/data]
+    networks: [net_b]
+    deploy: { placement: { constraints: [node.labels.gate_b == true] } }
+  api-b:
+    <<: *app
+    env_file: nodes/b.env
+    environment: { COMPONENT: api, PUBLIC_URL: "http://${HOST_B:-vm2}:3002" }
+    ports: ["3002:3000"]
+    networks: [net_b, cluster]
+    deploy:
+      placement: { constraints: [node.labels.gate_b == true] }
+      restart_policy: { condition: any }
+      update_config: { order: start-first, failure_action: rollback }
+  worker-b:
+    <<: *app
+    command: ["node", "src/worker.js"]
+    env_file: nodes/b.env
+    environment: { COMPONENT: worker }
+    healthcheck: *worker_hc
+    networks: [net_b, cluster]
+    deploy: { placement: { constraints: [node.labels.gate_b == true] } }
+
+  # ---------------- Uzol C (stroj s labelom gate_c=true) ----------------
+  db-c:
+    <<: *db
+    volumes: [pgdata_c:/var/lib/postgresql/data]
+    networks: [net_c]
+    deploy: { placement: { constraints: [node.labels.gate_c == true] } }
+  api-c:
+    <<: *app
+    env_file: nodes/c.env
+    environment: { COMPONENT: api, PUBLIC_URL: "http://${HOST_C:-vm3}:3003" }
+    ports: ["3003:3000"]
+    networks: [net_c, cluster]
+    deploy:
+      placement: { constraints: [node.labels.gate_c == true] }
+      restart_policy: { condition: any }
+      update_config: { order: start-first, failure_action: rollback }
+  worker-c:
+    <<: *app
+    command: ["node", "src/worker.js"]
+    env_file: nodes/c.env
+    environment: { COMPONENT: worker }
+    healthcheck: *worker_hc
+    networks: [net_c, cluster]
+    deploy: { placement: { constraints: [node.labels.gate_c == true] } }
+
+  # Centralizované logy zo všetkých hostiteľov (Dozzle v režime swarm, agent na každej VM).
+  logs:
+    image: amir20/dozzle:latest
+    environment: { DOZZLE_MODE: swarm }
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    ports: ["8080:8080"]
+    networks: [cluster]
+    deploy: { mode: global }
+
+networks:
+  cluster:
+    driver: overlay
+    attachable: true
+  net_a: { driver: overlay }
+  net_b: { driver: overlay }
+  net_c: { driver: overlay }
+
+volumes:
+  pgdata_a:
+  pgdata_b:
+  pgdata_c:

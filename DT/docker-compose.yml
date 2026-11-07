@@ -1,0 +1,132 @@
+# GateSync – 3 uzly na jednom Docker hostiteľovi (základná simulácia).
+# Každý uzol = API kontajner + sync worker + vlastná PostgreSQL + vlastný volume.
+# Všetky aplikačné kontajnery používajú rovnaký obraz, líšia sa len súborom nodes/<x>.env.
+#
+#   docker compose up -d --build
+#   panely:  http://localhost:3001  (A)   http://localhost:3002  (B)   http://localhost:3003  (C)
+#   logy:    http://localhost:8080  (Dozzle – centralizované logy všetkých kontajnerov)
+
+name: gatesync
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-app: &app
+  build: ./app
+  image: gatesync-app:1.0
+  restart: unless-stopped
+  logging: *logging
+
+x-api: &api
+  <<: *app
+  environment: { COMPONENT: api }
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+    start_period: 15s
+
+x-worker: &worker
+  <<: *app
+  command: ["node", "src/worker.js"]
+  environment: { COMPONENT: worker }
+  healthcheck:
+    # worker zapisuje heartbeat každý cyklus – ak je starší ako 30 s, kontajner je unhealthy
+    test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(cat /tmp/worker-heartbeat) )) -lt 30"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+    start_period: 20s
+
+x-db: &db
+  image: postgres:16-alpine
+  restart: unless-stopped
+  logging: *logging
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: gatesync
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d gatesync"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+services:
+  # ---------------- Uzol A ----------------
+  db-a:
+    <<: *db
+    volumes: [pgdata_a:/var/lib/postgresql/data]
+    networks: [net_a]
+    ports: ["5432:5432"]          # len na ladenie (pgAdmin / DataGrip)
+  api-a:
+    <<: *api
+    env_file: nodes/a.env
+    ports: ["3001:3000"]
+    networks: [net_a, cluster]
+    depends_on: { db-a: { condition: service_healthy } }
+  worker-a:
+    <<: *worker
+    env_file: nodes/a.env
+    networks: [net_a, cluster]
+    depends_on: { db-a: { condition: service_healthy } }
+
+  # ---------------- Uzol B ----------------
+  db-b:
+    <<: *db
+    volumes: [pgdata_b:/var/lib/postgresql/data]
+    networks: [net_b]
+    ports: ["5433:5432"]
+  api-b:
+    <<: *api
+    env_file: nodes/b.env
+    ports: ["3002:3000"]
+    networks: [net_b, cluster]
+    depends_on: { db-b: { condition: service_healthy } }
+  worker-b:
+    <<: *worker
+    env_file: nodes/b.env
+    networks: [net_b, cluster]
+    depends_on: { db-b: { condition: service_healthy } }
+
+  # ---------------- Uzol C ----------------
+  db-c:
+    <<: *db
+    volumes: [pgdata_c:/var/lib/postgresql/data]
+    networks: [net_c]
+    ports: ["5434:5432"]
+  api-c:
+    <<: *api
+    env_file: nodes/c.env
+    ports: ["3003:3000"]
+    networks: [net_c, cluster]
+    depends_on: { db-c: { condition: service_healthy } }
+  worker-c:
+    <<: *worker
+    env_file: nodes/c.env
+    networks: [net_c, cluster]
+    depends_on: { db-c: { condition: service_healthy } }
+
+  # ---------------- Centralizované logovanie ----------------
+  logs:
+    image: amir20/dozzle:latest
+    restart: unless-stopped
+    ports: ["8080:8080"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    environment:
+      DOZZLE_FILTER: "label=com.docker.compose.project=gatesync"
+
+# Každý uzol má vlastnú internú sieť (API ↔ jeho DB) a všetky API/workery zdieľajú sieť "cluster".
+# Odpojenie uzla = odpojenie jeho api-x a worker-x od siete "cluster" – s vlastnou DB pracuje ďalej.
+networks:
+  cluster:
+  net_a:
+  net_b:
+  net_c:
+
+volumes:
+  pgdata_a:
+  pgdata_b:
+  pgdata_c:

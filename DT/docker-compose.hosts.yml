@@ -1,0 +1,36 @@
+# GateSync – nasadenie na viac Docker hostiteľov (napr. 2 počítače s Windows + Docker Desktop) bez Swarmu.
+# Dopĺňa docker-compose.yml: uzly sa nehľadajú cez spoločnú Docker sieť, ale cez IP adresy počítačov
+# a publikované porty (A = 3001, B = 3002, C = 3003). IP adresy sú v súbore hosts.env.
+#
+#   počítač 1 (uzol A):
+#     docker compose -f docker-compose.yml -f docker-compose.hosts.yml --env-file hosts.env up -d --build db-a api-a worker-a logs
+#   počítač 2 (uzly B a C):
+#     docker compose -f docker-compose.yml -f docker-compose.hosts.yml --env-file hosts.env up -d --build db-b api-b worker-b db-c api-c worker-c logs
+
+x-peers-a: &peers_a "B=http://${HOST_B:?nastav HOST_B v hosts.env}:3002,C=http://${HOST_C:?nastav HOST_C v hosts.env}:3003"
+x-peers-b: &peers_b "A=http://${HOST_A:?nastav HOST_A v hosts.env}:3001,C=http://${HOST_C}:3003"
+x-peers-c: &peers_c "A=http://${HOST_A}:3001,B=http://${HOST_B}:3002"
+
+services:
+  api-a:
+    environment: { COMPONENT: api, PEERS: *peers_a, PUBLIC_URL: "http://${HOST_A}:3001" }
+  worker-a:
+    environment: { COMPONENT: worker, PEERS: *peers_a }
+  api-b:
+    environment: { COMPONENT: api, PEERS: *peers_b, PUBLIC_URL: "http://${HOST_B}:3002" }
+  worker-b:
+    environment: { COMPONENT: worker, PEERS: *peers_b }
+  api-c:
+    environment: { COMPONENT: api, PEERS: *peers_c, PUBLIC_URL: "http://${HOST_C}:3003" }
+  worker-c:
+    environment: { COMPONENT: worker, PEERS: *peers_c }
+
+# Docker štandardne prideľuje sieťam rozsahy 172.17–172.31.x.x. Hotspot iPhonu používa 172.20.10.x,
+# takže sieť Dockeru by sa mohla prekrývať so skutočnou sieťou a kontajner by druhý počítač nenašiel
+# ("Host is unreachable"). Preto majú siete pevné rozsahy mimo tejto oblasti.
+networks:
+  default: { ipam: { config: [{ subnet: 10.201.0.0/24 }] } }
+  cluster: { ipam: { config: [{ subnet: 10.201.1.0/24 }] } }
+  net_a:   { ipam: { config: [{ subnet: 10.201.2.0/24 }] } }
+  net_b:   { ipam: { config: [{ subnet: 10.201.3.0/24 }] } }
+  net_c:   { ipam: { config: [{ subnet: 10.201.4.0/24 }] } }

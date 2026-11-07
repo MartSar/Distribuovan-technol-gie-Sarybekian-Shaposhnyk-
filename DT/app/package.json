@@ -1,0 +1,21 @@
+{
+  "name": "gatesync",
+  "version": "1.0.0",
+  "description": "Kontajnerizovaný distribuovaný IS – kontrola vstupeniek na troch bránach (uzly A, B, C)",
+  "license": "ISC",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.3",
+    "express": "^5.2.1",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

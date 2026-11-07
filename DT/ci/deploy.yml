@@ -1,0 +1,59 @@
+# Automatické nasadenie: pri pushi do main sa zostaví obraz, nahrá do GHCR
+# a (ak je nastavené) nasadí na Swarm manažéra cez SSH.
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/gatesync-app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:1.0
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Zapne sa nastavením repository variable DEPLOY_ENABLED=true a secrets SWARM_HOST/USER/SSH_KEY.
+    if: vars.DEPLOY_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy stack files to manager
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SWARM_HOST }}
+          username: ${{ secrets.SWARM_USER }}
+          key: ${{ secrets.SWARM_SSH_KEY }}
+          source: "docker-stack.yml,nodes/"
+          target: "~/gatesync"
+      - name: docker stack deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SWARM_HOST }}
+          username: ${{ secrets.SWARM_USER }}
+          key: ${{ secrets.SWARM_SSH_KEY }}
+          script: |
+            cd ~/gatesync
+            REGISTRY=ghcr.io/${{ github.repository_owner }} TAG=${{ github.sha }} \
+              docker stack deploy --with-registry-auth -c docker-stack.yml gatesync
